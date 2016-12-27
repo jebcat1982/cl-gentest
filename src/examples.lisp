@@ -12,3 +12,7 @@
 
 
 
+(clear-checks)
+(check wat ((c '(list integer)))
+  (holds (< (length c) 3))
+  )

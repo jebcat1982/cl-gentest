@@ -150,6 +150,8 @@
 
 ;;;; Running Tests ------------------------------------------------------------
 (defparameter *test-count* 100)
+(defparameter *current-args* nil)
+(defparameter *current-data* nil)
 
 (defun generate-data (data)
   (append
@@ -164,13 +166,60 @@
                          :collect (generate (data-generator-designator d))))))
 
 
+(define-condition check-violated (error)
+  ((form :initarg :form)
+   (value :initarg :value)))
+
+
+(defmethod print-object ((object check-violated) stream)
+  (format stream
+          "Test failed: ~S returned null for data:~{~%  ~S = ~S~}"
+          (slot-value object 'form)
+          (mapcan #'list *current-args* *current-data*)))
+
+
+(defun check-succeeds-p (check data)
+  (handler-case (progn (apply (check-function check) data)
+                       t)
+    (check-violated () nil)))
+
+(defun remove-successes (check candidates)
+  (remove-if (curry #'check-succeeds-p check)
+             candidates))
+
+(defun shrink-each (check data)
+  ; please kill me
+  (loop :for g :in (mapcar #'data-generator-designator (check-data check))
+        :for (d . remaining) :on data
+        :append (mapcar (lambda (v)
+                          (append prefix (list v) remaining))
+                        (shrink g d)) :into result
+        :collect d :into prefix
+        :finally (return result)))
+
+(defun shrink-failure (check candidates)
+  (let* ((next (remove-successes check (mapcan (curry #'shrink-each check)
+                                               candidates))))
+    (if next
+      (shrink-failure check next)
+      (first candidates))))
+
+
 (defun run-check% (check)
   (write (check-name check))
   (loop :with function = (check-function check)
-        :for i :from 0
-        :for data :in (generate-data (check-data check))
-        :do (progn (apply function data)
-                   (write-string "."))
+        :with data = (check-data check)
+        :with args = (mapcar #'data-symbol data)
+        :for i :from 1
+        :for values :in (generate-data (check-data check))
+        :do (handler-case (apply function values)
+              (check-violated
+                ()
+                (let* ((final-failing-values (shrink-failure check (list values)))
+                       (*current-args* args)
+                       (*current-data* final-failing-values))
+                  (apply function final-failing-values))))
+        :do (write-string ".")
         :finally (format t " ~D tests passed~%" i))
   nil)
 
@@ -196,7 +245,17 @@
   (multiple-value-bind (data args) (parse-data data)
     `(add-check ',name
       (list ,@data)
-      (lambda ,args ,@body))))
+      (lambda ,args
+        (declare (optimize (debug 3)))
+        ,@body))))
 
 
-; (defmacro holds (form))
+(defmacro holds (form)
+  (with-gensyms (result)
+    `(let ((,result ,form))
+      (if (not ,result)
+        (restart-case
+          (error 'check-violated
+                 :form ',form
+                 :value ,result)
+          (ignore () :report "Ignore this failure and continue testing."))))))
